@@ -70,6 +70,7 @@ ASSISTANT_ID = "chat_langchain_lite"
 # The application slug — matches the agent's own run naming (agent/agent.py's
 # `_config`) so the chat UI's traces line up with the scripted path.
 APP_SLUG = "chat-lc-lite"
+RUN_NAME = "chat-lc-lite-demo"
 
 # Human-feedback keys emitted by this chat UI and consumed by the monitoring /
 # online-eval automation. Keep these names stable so the two can't drift.
@@ -841,13 +842,28 @@ async def index(session, new: str = "", thread: str = ""):
 
 
 @rt("/send")
-async def send(session, q: str = ""):
+async def send(session, q: str = "", user_id: str = ""):
     q = (q or "").strip()
     if "thread" not in session:
         session["thread"] = str(uuid.uuid4())
     if not q:
         return ""
     thread_id = session["thread"]
+    if user_id.strip():
+        session["user_id"] = user_id.strip()
+    user_id = (session.get("user_id") or "").strip() or None
+    from utils.models import MODEL_CONFIG
+
+    metadata = {
+        "demo": "true",
+        "demo_type": APP_SLUG,
+        "model": MODEL_CONFIG["model"],
+        "thread_id": thread_id,
+        "environment": os.getenv("ENVIRONMENT", "development"),
+        "ls_provider": MODEL_CONFIG["provider"],
+        "ls_model_name": MODEL_CONFIG["model"],
+        **({"user_id": user_id} if user_id else {}),
+    }
     # Create the run ONCE here. The assistant bubble then joins this run's stream
     # over SSE, so EventSource reconnects re-attach instead of starting new runs.
     try:
@@ -862,10 +878,11 @@ async def send(session, q: str = ""):
             stream_mode="messages-tuple",
             stream_resumable=True,
             if_not_exists="create",
-            metadata={"demo": "true", "demo_type": APP_SLUG},
+            metadata=metadata,
             config={
-                "run_name": f"{APP_SLUG}-demo",
+                "run_name": RUN_NAME,
                 "tags": ["engine-demo", CONTEXT_HUB_REPO],
+                "metadata": metadata,
             },
         )
     except Exception:
