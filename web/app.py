@@ -62,6 +62,7 @@ from langsmith.schemas import FeedbackConfig
 from starlette.responses import PlainTextResponse, RedirectResponse
 
 from context import CONTEXT_HUB_REPO
+from utils.streaming import TRUNCATION_WARNING, message_was_truncated
 
 load_dotenv(override=True)
 
@@ -883,6 +884,7 @@ async def stream(session, run: str = ""):
 
     async def gen():
         acc = ""
+        truncated = False
         if not run_id or not thread_id:
             yield sse_message("⚠️ Invalid run.", event="token")
             yield sse_message(
@@ -902,6 +904,7 @@ async def stream(session, run: str = ""):
                 msg = data[0]
                 if not isinstance(msg, dict) or msg.get("type") != "AIMessageChunk":
                     continue
+                truncated = truncated or message_was_truncated(msg)
                 acc += _msg_text(msg.get("content"))
                 if acc:
                     yield sse_message(acc, event="token")
@@ -911,6 +914,9 @@ async def stream(session, run: str = ""):
             # wipe the partial answer already shown.
             warning = "\n\n⚠️ The response was interrupted. Please try again."
             yield sse_message((acc + warning) if acc else warning.strip(), event="token")
+        if truncated:
+            text = f"{acc}\n\n{TRUNCATION_WARNING}" if acc else TRUNCATION_WARNING
+            yield sse_message(text, event="token")
         # Feedback + trace bar once the response is complete.
         yield sse_message(fb_bar(run_id), event="actions")
         # The payload must be non-empty: an SSE frame with no `data:` line is not
@@ -1092,15 +1098,20 @@ async def _history_bubbles(thread_id: str) -> list[FT]:
 
     bubbles: list[FT] = []
     pending_ai: list[str] = []
+    pending_truncated = False
     turn = 0
 
     def _flush_ai() -> None:
-        nonlocal turn
+        nonlocal pending_truncated, turn
         if pending_ai:
             rid = run_ids[turn] if turn < len(run_ids) else None
             score = votes.get(rid) if rid else None
-            bubbles.append(assistant_static(rid, "\n\n".join(pending_ai), score))
+            text = "\n\n".join(pending_ai)
+            if pending_truncated:
+                text = f"{text}\n\n{TRUNCATION_WARNING}"
+            bubbles.append(assistant_static(rid, text, score))
             pending_ai.clear()
+            pending_truncated = False
             turn += 1
 
     for m in messages:
@@ -1115,5 +1126,6 @@ async def _history_bubbles(thread_id: str) -> list[FT]:
             # Collapse consecutive assistant messages (preamble + final answer)
             # into one bubble, matching the live single-bubble rendering.
             pending_ai.append(text)
+            pending_truncated = pending_truncated or message_was_truncated(m)
     _flush_ai()
     return bubbles

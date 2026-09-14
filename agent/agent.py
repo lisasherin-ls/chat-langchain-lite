@@ -2,7 +2,7 @@ import os
 
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
 from deepagents.middleware.filesystem import FilesystemMiddleware
@@ -10,7 +10,7 @@ from deepagents.backends.context_hub import ContextHubBackend
 
 from agent.tools import TOOLS
 from context import CONTEXT_HUB_REPO, get_prompt
-from utils.streaming import iter_text
+from utils.streaming import TRUNCATION_WARNING, iter_text, message_was_truncated
 from utils.models import model
 
 # AGENTS.md is the agent's system prompt — pulled fresh from LangSmith
@@ -71,19 +71,33 @@ def _user_msg(question: str) -> dict:
 def invoke_agent(question: str, thread_id: str | None = None) -> dict:
     """Run the agent once. Returns {output, tools_called, messages}."""
     result = build_agent().invoke(_user_msg(question), _config(thread_id))
-    output = next(
-        (m.content for m in reversed(result["messages"])
-         if isinstance(getattr(m, "content", None), str) and m.content),
-        "",
+    final_assistant = next(
+        (m for m in reversed(result["messages"]) if isinstance(m, AIMessage)),
+        None,
     )
+    output = ""
+    if final_assistant is not None and isinstance(final_assistant.content, str):
+        output = final_assistant.content
+    if not output:
+        output = next(
+            (m.content for m in reversed(result["messages"])
+             if isinstance(getattr(m, "content", None), str) and m.content),
+            "",
+        )
+    if final_assistant is not None and message_was_truncated(final_assistant):
+        output = f"{output}\n\n{TRUNCATION_WARNING}" if output else TRUNCATION_WARNING
     tools_called = [m.name for m in result["messages"] if isinstance(m, ToolMessage)]
     return {"output": output, "tools_called": tools_called, "messages": result["messages"]}
 
 
 def stream_agent(question: str, thread_id: str | None = None):
     """Stream the agent's response text as it's generated."""
+    truncated = False
     for chunk, _meta in build_agent().stream(
         _user_msg(question), _config(thread_id), stream_mode="messages"
     ):
         if isinstance(chunk, AIMessageChunk):
+            truncated = truncated or message_was_truncated(chunk)
             yield from iter_text(chunk)
+    if truncated:
+        yield TRUNCATION_WARNING
