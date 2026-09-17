@@ -13,6 +13,17 @@ from typing import Iterable
 
 from langchain_core.messages import AIMessageChunk
 
+TRUNCATION_WARNING = "⚠️ The response was cut short by the output limit."
+
+
+def message_was_truncated(message) -> bool:
+    """Return whether a message reports a max-token stop reason."""
+    if isinstance(message, dict):
+        metadata = message.get("response_metadata")
+    else:
+        metadata = getattr(message, "response_metadata", None)
+    return isinstance(metadata, dict) and metadata.get("stop_reason") == "max_tokens"
+
 
 def iter_text(chunk: AIMessageChunk) -> Iterable[str]:
     """Yield the user-visible text fragments from one AIMessageChunk.
